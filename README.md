@@ -52,7 +52,5 @@ Automatically generate a large number of BGSM files from a single template BGSM 
 ### 4. NIF Generator
 Automatically generate NIF files by assigning each BGSM from a generated BGSM folder to a template NIF file.
 
----
-
 ## License
 This project is licensed under the MIT License.
