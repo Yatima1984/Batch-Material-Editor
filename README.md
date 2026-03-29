@@ -22,7 +22,7 @@ Material Editorのように BGSM / BGEM ファイルを開き、各種パラメ�
 - Material Swapを実装するために大量のBGSMを生成しなければならないときに便利です
 
 ### 4. NIF生成 (NIF Generator)
-「テンプレートとなるNIFファイル」と「生成済みのBGSMフォルダ」から、**各BGSMを割り当てたNIFファイルを自動生成**します。
+「テンプレートとなるNIFファイル」と「BGSMフォルダ」から、**各BGSMを割り当てたNIFファイルを自動生成**します。
 
 ## License
 This project is licensed under the MIT License.
@@ -54,7 +54,7 @@ Automatically generate a large number of BGSM files from a single template BGSM 
 - Ideal when you need to generate many BGSM files for implementing Material Swap.
 
 ### 4. NIF Generator
-Automatically generate NIF files by assigning each BGSM from a generated BGSM folder to a template NIF file.
+It **automatically generates NIF files with each BGSM assigned** from the ‘NIF template file’ and the ‘BGSM folder’.
 
 ## License
 This project is licensed under the MIT License.
