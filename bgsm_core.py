@@ -1,9 +1,3 @@
-"""
-bgsm_core.py
-Fallout 4 BGSM バイナリ読み書きコアライブラリ
-
-"""
-
 import struct
 import json
 import os
