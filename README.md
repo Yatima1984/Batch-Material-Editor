@@ -3,6 +3,8 @@
 Fallout 4 のマテリアルファイル（`.bgsm` / `.bgem`）を直感的に、かつ一括で操作するための強力なGUIツールです。
 単一ファイルの編集だけでなく、複数のファイルに対するテクスチャパスの一括置換や、テクスチャ（DDSフォルダ）および3Dモデル（NIFテンプレート）に基づいた自動バッチ生成機能を備えています。
 
+<img width="1073" height="993" alt="スクリーンショット 2026-03-29 105004" src="https://github.com/user-attachments/assets/66f54e78-e786-41a7-b7ad-4cbfb2ec5e04" />
+
 ## 主な機能
 
 ### 1. 単体編集 (Single Editor)
@@ -31,6 +33,8 @@ This project is licensed under the MIT License.
 
 A powerful GUI tool designed for intuitive and bulk editing of Fallout 4 material files (`.bgsm` / `.bgem`).  
 In addition to editing single files, it supports batch texture path replacement and automatic batch generation based on texture (DDS folders) and 3D models (NIF templates).
+
+<img width="1073" height="993" alt="スクリーンショット 2026-03-29 105004" src="https://github.com/user-attachments/assets/de22dd68-046a-4ad7-a2f2-71e1dfe48b9c" />
 
 ## Main Features
 
