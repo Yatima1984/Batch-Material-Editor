@@ -2,8 +2,6 @@
 bgsm_core.py
 Fallout 4 BGSM バイナリ読み書きコアライブラリ
 
-C# 版 Material Editor (MaterialLib/BGSM.cs + BaseMaterialFile.cs) を
-Python で忠実に移植。FO4 v1/v2 対応。
 """
 
 import struct
