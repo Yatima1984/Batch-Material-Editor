@@ -34,9 +34,10 @@ def _encode_alpha_blend(mode: str):
 
 
 def _color_float_to_uint(r: float, g: float, b: float) -> int:
-    ri = int(r * 255) & 0xFF
-    gi = int(g * 255) & 0xFF
-    bi = int(b * 255) & 0xFF
+    # 1.0 超 (HDR) や負値は 0〜255 に丸める（& 0xFF だと桁あふれして別の色になる）
+    ri = min(max(int(r * 255), 0), 255)
+    gi = min(max(int(g * 255), 0), 255)
+    bi = min(max(int(b * 255), 0), 255)
     return (ri << 16) | (gi << 8) | bi
 
 
@@ -56,6 +57,42 @@ def _color_hex_to_uint(s: str) -> int:
     if len(s) == 3:
         s = s[0]*2 + s[1]*2 + s[2]*2
     return int(s, 16) & 0xFFFFFF
+
+
+# ---- 読み書きで値を失わないためのヘルパー ----
+# 色は UI 上 24bit RGB で扱うため、読み込んだ元の浮動小数値を保持しておき、
+# 値が変更されていなければ元の値 (HDR や 8bit に収まらない精度を含む) をそのまま書き戻す。
+def _read_color_field(obj, r: "_Reader", attr: str):
+    rgb = r.read_color()
+    setattr(obj, attr, _color_float_to_uint(*rgb))
+    obj._raw_colors[attr] = rgb
+
+
+def _write_color_field(obj, w: "_Writer", attr: str):
+    v = getattr(obj, attr)
+    raw = obj._raw_colors.get(attr)
+    if raw is not None and _color_float_to_uint(*raw) == v:
+        w.write_color(*raw)
+    else:
+        w.write_color(*_color_uint_to_float(v))
+
+
+# 未知の組み合わせ ("Unknown") でも元の 3 値をそのまま書き戻す
+def _read_alpha_blend(obj, r: "_Reader"):
+    raw = (r.read_byte(), r.read_uint32(), r.read_uint32())
+    obj.alpha_blend_mode = _decode_alpha_blend(*raw)
+    obj._raw_alpha_blend = raw
+
+
+def _write_alpha_blend(obj, w: "_Writer"):
+    raw = obj._raw_alpha_blend
+    if raw is not None and _decode_alpha_blend(*raw) == obj.alpha_blend_mode:
+        a0, a1, a2 = raw
+    else:
+        a0, a1, a2 = _encode_alpha_blend(obj.alpha_blend_mode)
+    w.write_byte(a0)
+    w.write_uint32(a1)
+    w.write_uint32(a2)
 
 
 class _Reader:
@@ -171,8 +208,21 @@ class BGSM:
     inner_layer_texture: str = ""
     wrinkles_texture: str = ""
     displacement_texture: str = ""
+    # v>2 専用 (FO76)
+    specular_texture: str = ""
+    lighting_texture: str = ""
+    flow_texture: str = ""
+    distance_field_alpha_texture: str = ""  # v>=17
 
     enable_editor_alpha_ref: bool = False
+
+    # v>=8
+    translucency: bool = False
+    translucency_thick_object: bool = False
+    translucency_mix_albedo_with_subsurface_color: bool = False
+    translucency_subsurface_color: int = 0x000000
+    translucency_transmissive_scale: float = 0.0
+    translucency_turbulence: float = 0.0
 
     # v<8
     rim_lighting: bool = False
@@ -193,6 +243,11 @@ class BGSM:
     wetness_control_fresnel_power: float = -1.0
     wetness_control_metalness: float = -1.0
 
+    # v>2
+    pbr: bool = False
+    custom_porosity: bool = False   # v>=9
+    porosity_value: float = 0.0     # v>=9
+
     root_material_path: str = ""
     aniso_lighting: bool = False
     emit_enabled: bool = False
@@ -200,6 +255,12 @@ class BGSM:
     emittance_mult: float = 1.0
     model_space_normals: bool = False
     external_emittance: bool = False
+    lum_emittance: float = 0.0        # v>=12
+    # v>=13
+    use_adaptive_emissive: bool = False
+    adaptive_emissive_exposure_offset: float = 0.0
+    adaptive_emissive_final_exposure_min: float = 0.0
+    adaptive_emissive_final_exposure_max: float = 0.0
     back_lighting: bool = False       # v<8
     receive_shadows: bool = False
     hide_secret: bool = False
@@ -231,6 +292,8 @@ class BGSM:
 
     # ---- 内部 ----
     _raw_path: str = field(default="", repr=False)
+    _raw_colors: dict = field(default_factory=dict, repr=False, compare=False)
+    _raw_alpha_blend: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     # ===== 読み込み =====
     @classmethod
@@ -259,10 +322,7 @@ class BGSM:
         self.v_scale = r.read_float()
 
         self.alpha = r.read_float()
-        a0 = r.read_byte()
-        a1 = r.read_uint32()
-        a2 = r.read_uint32()
-        self.alpha_blend_mode = _decode_alpha_blend(a0, a1, a2)
+        _read_alpha_blend(self, r)
         self.alpha_test_ref = r.read_byte()
         self.alpha_test = r.read_bool()
 
@@ -300,11 +360,11 @@ class BGSM:
             self.glow_texture = r.read_string()
             self.wrinkles_texture = r.read_string()
             # v>2 専用テクスチャ (FO76用)
-            r.read_string()  # SpecularTexture
-            r.read_string()  # LightingTexture
-            r.read_string()  # FlowTexture
+            self.specular_texture = r.read_string()
+            self.lighting_texture = r.read_string()
+            self.flow_texture = r.read_string()
             if self.version >= 17:
-                r.read_string()  # DistanceFieldAlphaTexture
+                self.distance_field_alpha_texture = r.read_string()
         else:
             self.envmap_texture = r.read_string()
             self.glow_texture = r.read_string()
@@ -315,12 +375,12 @@ class BGSM:
         self.enable_editor_alpha_ref = r.read_bool()
 
         if self.version >= 8:
-            r.read_bool()   # Translucency
-            r.read_bool()   # TranslucencyThickObject
-            r.read_bool()   # TranslucencyMixAlbedoWithSubsurfaceColor
-            r.read_color()  # TranslucencySubsurfaceColor
-            r.read_float()  # TranslucencyTransmissiveScale
-            r.read_float()  # TranslucencyTurbulence
+            self.translucency = r.read_bool()
+            self.translucency_thick_object = r.read_bool()
+            self.translucency_mix_albedo_with_subsurface_color = r.read_bool()
+            _read_color_field(self, r, "translucency_subsurface_color")
+            self.translucency_transmissive_scale = r.read_float()
+            self.translucency_turbulence = r.read_float()
         else:
             self.rim_lighting = r.read_bool()
             self.rim_power = r.read_float()
@@ -329,8 +389,7 @@ class BGSM:
             self.subsurface_lighting_rolloff = r.read_float()
 
         self.specular_enabled = r.read_bool()
-        sr, sg, sb = r.read_color()
-        self.specular_color = _color_float_to_uint(sr, sg, sb)
+        _read_color_field(self, r, "specular_color")
         self.specular_mult = r.read_float()
         self.smoothness = r.read_float()
 
@@ -346,31 +405,30 @@ class BGSM:
         self.wetness_control_metalness = r.read_float()
 
         if self.version > 2:
-            r.read_bool()  # PBR
+            self.pbr = r.read_bool()
             if self.version >= 9:
-                r.read_bool()   # CustomPorosity
-                r.read_float()  # PorosityValue
+                self.custom_porosity = r.read_bool()
+                self.porosity_value = r.read_float()
 
         self.root_material_path = r.read_string()
         self.aniso_lighting = r.read_bool()
         self.emit_enabled = r.read_bool()
 
         if self.emit_enabled:
-            er, eg, eb = r.read_color()
-            self.emittance_color = _color_float_to_uint(er, eg, eb)
+            _read_color_field(self, r, "emittance_color")
 
         self.emittance_mult = r.read_float()
         self.model_space_normals = r.read_bool()
         self.external_emittance = r.read_bool()
 
         if self.version >= 12:
-            r.read_float()  # LumEmittance
+            self.lum_emittance = r.read_float()
 
         if self.version >= 13:
-            r.read_bool()   # UseAdaptativeEmissive
-            r.read_float()  # AdaptativeEmissive_ExposureOffset
-            r.read_float()  # AdaptativeEmissive_FinalExposureMin
-            r.read_float()  # AdaptativeEmissive_FinalExposureMax
+            self.use_adaptive_emissive = r.read_bool()
+            self.adaptive_emissive_exposure_offset = r.read_float()
+            self.adaptive_emissive_final_exposure_min = r.read_float()
+            self.adaptive_emissive_final_exposure_max = r.read_float()
 
         if self.version < 8:
             self.back_lighting = r.read_bool()
@@ -388,8 +446,7 @@ class BGSM:
             self.environment_mapping_eye = r.read_bool()
 
         self.hair = r.read_bool()
-        hr, hg, hb = r.read_color()
-        self.hair_tint_color = _color_float_to_uint(hr, hg, hb)
+        _read_color_field(self, r, "hair_tint_color")
 
         self.tree = r.read_bool()
         self.facegen = r.read_bool()
@@ -439,10 +496,7 @@ class BGSM:
         w.write_float(self.v_scale)
 
         w.write_float(self.alpha)
-        a0, a1, a2 = _encode_alpha_blend(self.alpha_blend_mode)
-        w.write_byte(a0)
-        w.write_uint32(a1)
-        w.write_uint32(a2)
+        _write_alpha_blend(self, w)
         w.write_byte(self.alpha_test_ref)
         w.write_bool(self.alpha_test)
 
@@ -479,11 +533,11 @@ class BGSM:
         if self.version > 2:
             w.write_string(self.glow_texture)
             w.write_string(self.wrinkles_texture)
-            w.write_string("")  # SpecularTexture
-            w.write_string("")  # LightingTexture
-            w.write_string("")  # FlowTexture
+            w.write_string(self.specular_texture)
+            w.write_string(self.lighting_texture)
+            w.write_string(self.flow_texture)
             if self.version >= 17:
-                w.write_string("")  # DistanceFieldAlphaTexture
+                w.write_string(self.distance_field_alpha_texture)
         else:
             w.write_string(self.envmap_texture)
             w.write_string(self.glow_texture)
@@ -494,12 +548,12 @@ class BGSM:
         w.write_bool(self.enable_editor_alpha_ref)
 
         if self.version >= 8:
-            w.write_bool(False)    # Translucency
-            w.write_bool(False)    # TranslucencyThickObject
-            w.write_bool(False)    # TranslucencyMixAlbedoWithSubsurfaceColor
-            w.write_color(0, 0, 0) # TranslucencySubsurfaceColor
-            w.write_float(0)       # TranslucencyTransmissiveScale
-            w.write_float(0)       # TranslucencyTurbulence
+            w.write_bool(self.translucency)
+            w.write_bool(self.translucency_thick_object)
+            w.write_bool(self.translucency_mix_albedo_with_subsurface_color)
+            _write_color_field(self, w, "translucency_subsurface_color")
+            w.write_float(self.translucency_transmissive_scale)
+            w.write_float(self.translucency_turbulence)
         else:
             w.write_bool(self.rim_lighting)
             w.write_float(self.rim_power)
@@ -508,8 +562,7 @@ class BGSM:
             w.write_float(self.subsurface_lighting_rolloff)
 
         w.write_bool(self.specular_enabled)
-        sr, sg, sb = _color_uint_to_float(self.specular_color)
-        w.write_color(sr, sg, sb)
+        _write_color_field(self, w, "specular_color")
         w.write_float(self.specular_mult)
         w.write_float(self.smoothness)
 
@@ -525,31 +578,30 @@ class BGSM:
         w.write_float(self.wetness_control_metalness)
 
         if self.version > 2:
-            w.write_bool(False)  # PBR
+            w.write_bool(self.pbr)
             if self.version >= 9:
-                w.write_bool(False)  # CustomPorosity
-                w.write_float(0)     # PorosityValue
+                w.write_bool(self.custom_porosity)
+                w.write_float(self.porosity_value)
 
         w.write_string(self.root_material_path)
         w.write_bool(self.aniso_lighting)
         w.write_bool(self.emit_enabled)
 
         if self.emit_enabled:
-            er, eg, eb = _color_uint_to_float(self.emittance_color)
-            w.write_color(er, eg, eb)
+            _write_color_field(self, w, "emittance_color")
 
         w.write_float(self.emittance_mult)
         w.write_bool(self.model_space_normals)
         w.write_bool(self.external_emittance)
 
         if self.version >= 12:
-            w.write_float(0)  # LumEmittance
+            w.write_float(self.lum_emittance)
 
         if self.version >= 13:
-            w.write_bool(False)  # UseAdaptativeEmissive
-            w.write_float(0)     # ExposureOffset
-            w.write_float(0)     # FinalExposureMin
-            w.write_float(0)     # FinalExposureMax
+            w.write_bool(self.use_adaptive_emissive)
+            w.write_float(self.adaptive_emissive_exposure_offset)
+            w.write_float(self.adaptive_emissive_final_exposure_min)
+            w.write_float(self.adaptive_emissive_final_exposure_max)
 
         if self.version < 8:
             w.write_bool(self.back_lighting)
@@ -567,8 +619,7 @@ class BGSM:
             w.write_bool(self.environment_mapping_eye)
 
         w.write_bool(self.hair)
-        hr, hg, hb = _color_uint_to_float(self.hair_tint_color)
-        w.write_color(hr, hg, hb)
+        _write_color_field(self, w, "hair_tint_color")
 
         w.write_bool(self.tree)
         w.write_bool(self.facegen)
@@ -723,6 +774,8 @@ class BGEM:
 
     # ---- 内部 ----
     _raw_path: str = field(default="", repr=False)
+    _raw_colors: dict = field(default_factory=dict, repr=False, compare=False)
+    _raw_alpha_blend: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     # ===== 読み込み =====
     @classmethod
@@ -752,10 +805,7 @@ class BGEM:
         self.v_scale = r.read_float()
 
         self.alpha = r.read_float()
-        a0 = r.read_byte()
-        a1 = r.read_uint32()
-        a2 = r.read_uint32()
-        self.alpha_blend_mode = _decode_alpha_blend(a0, a1, a2)
+        _read_alpha_blend(self, r)
         self.alpha_test_ref = r.read_byte()
         self.alpha_test = r.read_bool()
 
@@ -806,8 +856,7 @@ class BGEM:
         self.grayscale_to_palette_alpha = r.read_bool()
         self.soft_enabled = r.read_bool()
 
-        br, bg, bb = r.read_color()
-        self.base_color = _color_float_to_uint(br, bg, bb)
+        _read_color_field(self, r, "base_color")
         self.base_color_scale = r.read_float()
 
         self.falloff_start_angle = r.read_float()
@@ -820,8 +869,7 @@ class BGEM:
         self.soft_depth = r.read_float()
 
         if self.version >= 11:
-            er, eg, eb = r.read_color()
-            self.emittance_color = _color_float_to_uint(er, eg, eb)
+            _read_color_field(self, r, "emittance_color")
 
         if self.version >= 15:
             self.adaptive_emissive_exposure_offset = r.read_float()
@@ -858,10 +906,7 @@ class BGEM:
         w.write_float(self.v_scale)
 
         w.write_float(self.alpha)
-        a0, a1, a2 = _encode_alpha_blend(self.alpha_blend_mode)
-        w.write_byte(a0)
-        w.write_uint32(a1)
-        w.write_uint32(a2)
+        _write_alpha_blend(self, w)
         w.write_byte(self.alpha_test_ref)
         w.write_bool(self.alpha_test)
 
@@ -912,8 +957,7 @@ class BGEM:
         w.write_bool(self.grayscale_to_palette_alpha)
         w.write_bool(self.soft_enabled)
 
-        br, bg, bb = _color_uint_to_float(self.base_color)
-        w.write_color(br, bg, bb)
+        _write_color_field(self, w, "base_color")
         w.write_float(self.base_color_scale)
 
         w.write_float(self.falloff_start_angle)
@@ -926,8 +970,7 @@ class BGEM:
         w.write_float(self.soft_depth)
 
         if self.version >= 11:
-            er, eg, eb = _color_uint_to_float(self.emittance_color)
-            w.write_color(er, eg, eb)
+            _write_color_field(self, w, "emittance_color")
 
         if self.version >= 15:
             w.write_float(self.adaptive_emissive_exposure_offset)
@@ -950,6 +993,25 @@ class BGEM:
                 continue
             d[k] = v
         return d
+
+
+# BGSM / BGEM 共通 (BaseMaterialFile) のフィールド
+BASE_FIELDS = (
+    "version", "tile_u", "tile_v", "u_offset", "v_offset", "u_scale", "v_scale",
+    "alpha", "alpha_blend_mode", "alpha_test_ref", "alpha_test",
+    "z_buffer_write", "z_buffer_test", "screen_space_reflections", "wetness_control_ssr",
+    "decal", "two_sided", "decal_no_fade", "non_occluder",
+    "refraction", "refraction_falloff", "refraction_power",
+    "environment_mapping", "environment_mapping_mask_scale", "depth_bias",
+    "grayscale_to_palette_color", "mask_writes",
+)
+
+
+def copy_base_fields(src, dst):
+    """BGSM ⇔ BGEM の切り替え用に共通フィールドをコピーする"""
+    for name in BASE_FIELDS:
+        setattr(dst, name, getattr(src, name))
+    dst._raw_alpha_blend = src._raw_alpha_blend
 
 
 def read_material(path: str):

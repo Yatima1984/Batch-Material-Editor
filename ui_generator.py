@@ -5,6 +5,7 @@ ui_generator.py — BGSM生成タブ
 """
 
 import os
+import copy
 import json
 from pathlib import Path
 from PyQt6.QtWidgets import (
@@ -40,7 +41,7 @@ def scan_dds_grouped(folder: str) -> dict[str, list[str]]:
 
 class GeneratorWorker(QThread):
     log = pyqtSignal(str)
-    finished = pyqtSignal(int, int)
+    done = pyqtSignal(int, int)  # QThread.finished を上書きしないよう別名にする
 
     def __init__(self, template: BGSM, grouped_dds: dict[str, list[str]],
                  out_dir: str, folder_maps: dict[str, tuple[str, str]],
@@ -70,13 +71,13 @@ class GeneratorWorker(QThread):
 
             for dds in dds_list:
                 try:
-                    b = BGSM()
-                    for attr in vars(self.template):
-                        if not attr.startswith("_"):
-                            # テクスチャ情報はテンプレートから引き継がない
-                            if attr.endswith("_texture"):
-                                continue
-                            setattr(b, attr, getattr(self.template, attr))
+                    b = copy.deepcopy(self.template)
+                    b._raw_path = ""
+                    # Normal / Smooth-Spec は空欄ならテンプレートの値を使う。
+                    # それ以外のテクスチャは Diffuse ごとに異なるため引き継がない。
+                    for attr in vars(b):
+                        if attr.endswith("_texture") and attr not in ("normal_texture", "smooth_spec_texture"):
+                            setattr(b, attr, "")
 
                     stem = Path(dds).stem
                     game_dds = extract_game_path(dds)
@@ -93,7 +94,7 @@ class GeneratorWorker(QThread):
                 except Exception as e:
                     self.log.emit(f"❌ {dds} → {e}")
                     err += 1
-        self.finished.emit(ok, err)
+        self.done.emit(ok, err)
 
 
 # ── フォルダ別 Normal/Spec 設定行ウィジェット ─────────────────────────────────
@@ -400,6 +401,8 @@ class GeneratorTab(QWidget):
 
     # ── 生成実行 ────────────────────────────────────────────────────────────
     def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
         if self._template is None:
             QMessageBox.warning(self, tr("Warning", AppConfig.lang),
                                 tr("Please select a template", AppConfig.lang))
@@ -439,10 +442,12 @@ class GeneratorTab(QWidget):
             self.edit_common_specular.text()
         )
         self._worker.log.connect(lambda msg: self._log_cb(msg) if self._log_cb else None)
-        self._worker.finished.connect(self._on_done)
+        self._worker.done.connect(self._on_done)
+        self.btn_gen.setEnabled(False)
         self._worker.start()
 
     def _on_done(self, ok: int, err: int):
+        self.btn_gen.setEnabled(True)
         msg = f"{tr('Done', AppConfig.lang)}: {ok} / Error {err}"
         if self._log_cb:
             self._log_cb(msg)

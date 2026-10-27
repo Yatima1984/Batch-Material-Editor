@@ -12,6 +12,10 @@ BSLightingShaderProperty の Name プロパティにマテリアルパスを設�
 import struct
 import os
 
+# 対応する NIF (Fallout 4)
+FO4_NIF_VERSION = 0x14020007  # 20.2.0.7
+FO4_BS_VERSION = 130
+
 # ==============================================================================
 # NIF バイナリ操作コア
 # ==============================================================================
@@ -57,6 +61,8 @@ class NifStringEditor:
         """NIF バイナリデータからヘッダを読み込む"""
         self.raw_data = data
         
+        if not data.startswith(b"Gamebryo File Format"):
+            raise ValueError("NIF ファイルではありません")
         newline_pos = data.index(b'\x0a')
         pos = newline_pos + 1
         
@@ -73,14 +79,18 @@ class NifStringEditor:
         self.bs_version = struct.unpack_from('<I', data, pos)[0]
         pos += 4
         
-        # Export Info: 3 x ShortString (1byte len + string with null)
-        for _ in range(3):
+        # FO4 以外 (Skyrim / FO76 等) はヘッダ構造が異なり、書き換えると壊れるため拒否する
+        if self.version != FO4_NIF_VERSION or self.bs_version != FO4_BS_VERSION:
+            raise ValueError(
+                f"未対応の NIF です (Version 0x{self.version:08X}, BS Version {self.bs_version})。"
+                f"Fallout 4 の NIF (20.2.0.7 / BS Version {FO4_BS_VERSION}) のみ対応しています"
+            )
+        
+        # Export Info: 3 x ExportString (1byte len + string with null)
+        # + BS Version 130: Max Filepath (ExportString)
+        for _ in range(4):
             slen = data[pos]
             pos += 1 + slen
-        
-        # BS Version >= 130: Max Filepath (ushort)
-        if self.bs_version >= 130:
-            pos += 2
         
         num_block_types = struct.unpack_from('<H', data, pos)[0]
         pos += 2
@@ -118,6 +128,8 @@ class NifStringEditor:
             pos += s_len
             self.strings.append(s_val)
         
+        if pos > len(data):
+            raise ValueError("NIF ヘッダの解析に失敗しました（ファイルが壊れている可能性があります）")
         self.post_strings_data = data[pos:]
     
     def write(self) -> bytes:
@@ -163,20 +175,45 @@ class NifStringEditor:
                     indices.append(i)
         return indices
     
+    def material_string_indices(self) -> list:
+        """置換対象となる .bgsm 文字列のインデックス（Materials\\ 始まりを優先）"""
+        return self.find_bgsm_string_indices(materials_only=True) or \
+            self.find_bgsm_string_indices(materials_only=False)
+    
+    def material_paths(self) -> list:
+        """NIF 内のマテリアルパス（大文字小文字を無視して重複を除いたもの、出現順）"""
+        seen = {}
+        for i in self.material_string_indices():
+            seen.setdefault(self.strings[i].lower(), self.strings[i])
+        return list(seen.values())
+    
     def has_bslsp(self) -> bool:
         return "BSLightingShaderProperty" in self.block_type_names
 
 
-def set_material_path(nif_data: bytes, material_path: str) -> bytes:
-    """NIF バイナリデータの文字列テーブル内の .bgsm パスを置き換える"""
+def set_material_path(nif_data: bytes, material_path: str, target_material: str = None) -> bytes:
+    """NIF バイナリデータの文字列テーブル内の .bgsm パスを置き換える。
+    
+    NIF 内に異なるマテリアルが複数ある場合（体と目など）は、すべてを同じパスにしてしまわないよう
+    target_material で置換対象を指定する必要がある。
+    """
     editor = NifStringEditor()
     editor.read(nif_data)
     
-    mat_indices = editor.find_bgsm_string_indices(materials_only=True)
-    if not mat_indices:
-        mat_indices = editor.find_bgsm_string_indices(materials_only=False)
+    mat_indices = editor.material_string_indices()
     if not mat_indices:
         raise ValueError("NIF ファイル内に .bgsm マテリアルパスが見つかりません")
+    
+    if target_material:
+        target = target_material.lower()
+        mat_indices = [i for i in mat_indices if editor.strings[i].lower() == target]
+        if not mat_indices:
+            raise ValueError(f"置換対象のマテリアルが NIF 内に見つかりません: {target_material}")
+    elif len(editor.material_paths()) > 1:
+        raise ValueError(
+            "NIF 内に複数のマテリアルがあります。置換対象を指定してください: "
+            + ", ".join(editor.material_paths())
+        )
     
     for idx in mat_indices:
         editor.strings[idx] = material_path
@@ -234,7 +271,8 @@ def batch_set_materials(
     bgsm_folder: str,
     material_prefix: str,
     output_folder: str,
-    progress_callback=None
+    progress_callback=None,
+    target_material: str = None
 ):
     """
     単一フォルダ内の BGSM でバッチ処理（従来版）。
@@ -261,7 +299,7 @@ def batch_set_materials(
         nif_name = os.path.splitext(bgsm_name)[0] + '.nif'
         mat_path = (material_prefix.rstrip('\\') + '\\' + bgsm_name).replace('/', '\\')
         
-        new_nif = set_material_path(original_nif, mat_path)
+        new_nif = set_material_path(original_nif, mat_path, target_material)
         
         output_path = os.path.join(output_folder, nif_name)
         with open(output_path, 'wb') as f:
@@ -280,7 +318,8 @@ def batch_set_materials_recursive(
     bgsm_root_folder: str,
     material_base_prefix: str,
     output_folder: str,
-    progress_callback=None
+    progress_callback=None,
+    target_material: str = None
 ):
     """
     サブフォルダを再帰的にスキャンし、各サブフォルダの BGSM に対応する
@@ -295,6 +334,7 @@ def batch_set_materials_recursive(
                               例: "Materials\\Eku_Race\\Eye"
         output_folder: 出力先ルートフォルダ
         progress_callback: (current, total, message)
+        target_material: 置換する元マテリアルパス（NIF 内に複数ある場合は必須）
     
     Returns:
         list: 生成されたファイルのリスト
@@ -329,7 +369,7 @@ def batch_set_materials_recursive(
             nif_name = os.path.splitext(bgsm_name)[0] + '.nif'
             mat_path = (mat_prefix + '\\' + bgsm_name).replace('/', '\\')
             
-            new_nif = set_material_path(original_nif, mat_path)
+            new_nif = set_material_path(original_nif, mat_path, target_material)
             
             output_path = os.path.join(out_subfolder, nif_name)
             with open(output_path, 'wb') as f:

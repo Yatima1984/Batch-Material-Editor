@@ -7,7 +7,8 @@ nif_material_batch.py のコア機能を PyQt6 UI に統合。
 import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QFileDialog, QGroupBox, QCheckBox, QProgressBar, QTextEdit, QMessageBox
+    QFileDialog, QGroupBox, QCheckBox, QProgressBar, QTextEdit, QMessageBox,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from config import AppConfig, tr
@@ -19,13 +20,14 @@ class NifBatchWorker(QThread):
     progress = pyqtSignal(int, int)
     finished_signal = pyqtSignal(int)
 
-    def __init__(self, nif_path, bgsm_folder, prefix, output_folder, recursive):
+    def __init__(self, nif_path, bgsm_folder, prefix, output_folder, recursive, target_material=None):
         super().__init__()
         self.nif_path = nif_path
         self.bgsm_folder = bgsm_folder
         self.prefix = prefix
         self.output_folder = output_folder
         self.recursive = recursive
+        self.target_material = target_material
 
     def run(self):
         from nif_core import (
@@ -42,7 +44,8 @@ class NifBatchWorker(QThread):
                     bgsm_root_folder=self.bgsm_folder,
                     material_base_prefix=self.prefix,
                     output_folder=self.output_folder,
-                    progress_callback=on_progress
+                    progress_callback=on_progress,
+                    target_material=self.target_material
                 )
             else:
                 generated = batch_set_materials(
@@ -50,7 +53,8 @@ class NifBatchWorker(QThread):
                     bgsm_folder=self.bgsm_folder,
                     material_prefix=self.prefix,
                     output_folder=self.output_folder,
-                    progress_callback=on_progress
+                    progress_callback=on_progress,
+                    target_material=self.target_material
                 )
             self.log.emit(f"\n🎉 {len(generated)} NIF files generated.")
             self.finished_signal.emit(len(generated))
@@ -88,6 +92,18 @@ class NifBatchTab(QWidget):
         row_nif.addWidget(self.edit_nif, 1)
         row_nif.addWidget(self.btn_nif)
         gl.addLayout(row_nif)
+
+        # 置換対象マテリアル（NIF 内に複数のマテリアルがある場合に選択する）
+        self.row_target = QWidget()
+        row_target = QHBoxLayout(self.row_target)
+        row_target.setContentsMargins(0, 0, 0, 0)
+        self.lbl_target = QLabel(tr("Target Material:", AppConfig.lang))
+        self.combo_target = QComboBox()
+        row_target.addWidget(self.lbl_target)
+        row_target.addWidget(self.combo_target, 1)
+        self.row_target.setVisible(False)
+        gl.addWidget(self.row_target)
+        self.edit_nif.textChanged.connect(self._refresh_target_materials)
 
         # BGSM フォルダ
         row_bgsm = QHBoxLayout()
@@ -195,6 +211,31 @@ class NifBatchTab(QWidget):
             if not self.edit_output.text():
                 self.edit_output.setText(os.path.join(os.path.dirname(path), "output"))
 
+    def _refresh_target_materials(self, *_):
+        """テンプレート NIF 内のマテリアル一覧を読み込み、複数あれば選択欄を表示する"""
+        from nif_core import NifStringEditor
+        self.combo_target.clear()
+        paths = []
+        nif_path = self.edit_nif.text()
+        if nif_path and os.path.isfile(nif_path):
+            try:
+                with open(nif_path, 'rb') as f:
+                    editor = NifStringEditor()
+                    editor.read(f.read())
+                paths = editor.material_paths()
+            except Exception:
+                paths = []
+        self.combo_target.addItems(paths)
+        self.row_target.setVisible(len(paths) > 1)
+        if len(paths) > 1:
+            self.combo_target.setToolTip(tr("This NIF contains multiple materials. Only the selected one is replaced.", AppConfig.lang))
+
+    def _selected_target(self):
+        """複数マテリアルの NIF なら選択中の置換対象、そうでなければ None"""
+        if self.combo_target.count() > 1:
+            return self.combo_target.currentText()
+        return None
+
     def _browse_bgsm(self):
         path = QFileDialog.getExistingDirectory(
             self, tr("BGSM Folder:", AppConfig.lang)
@@ -259,10 +300,13 @@ class NifBatchTab(QWidget):
                 v = editor.version
                 self._emit_log(f"   Version: {(v >> 24) & 0xFF}.{(v >> 16) & 0xFF}.{(v >> 8) & 0xFF}.{v & 0xFF}")
                 self._emit_log(f"   BS Version: {editor.bs_version}")
-                mat_indices = editor.find_bgsm_string_indices(materials_only=True)
+                mat_indices = editor.material_string_indices()
+                target = self._selected_target()
                 self._emit_log(f"   Replacement targets:")
                 for idx in mat_indices:
-                    self._emit_log(f"     [{idx}] {editor.strings[idx]} 🔄")
+                    s = editor.strings[idx]
+                    mark = "🔄" if target is None or s.lower() == target.lower() else "(keep)"
+                    self._emit_log(f"     [{idx}] {s} {mark}")
             except Exception as e:
                 self._emit_log(f"   ⚠ Header parse error: {e}")
 
@@ -324,7 +368,8 @@ class NifBatchTab(QWidget):
         self.progress.setValue(0)
         self._emit_log("🚀 " + tr("Starting batch process...", AppConfig.lang))
 
-        self._worker = NifBatchWorker(nif_path, bgsm_folder, prefix, output_folder, recursive)
+        self._worker = NifBatchWorker(nif_path, bgsm_folder, prefix, output_folder, recursive,
+                                      self._selected_target())
         self._worker.log.connect(self._emit_log)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_signal.connect(self._on_finished)
@@ -356,6 +401,8 @@ class NifBatchTab(QWidget):
     def retranslate(self, lang):
         self.grp_input.setTitle(tr("Input Settings", lang))
         self.lbl_nif.setText(tr("Source NIF File:", lang))
+        self.lbl_target.setText(tr("Target Material:", lang))
+        self.combo_target.setToolTip(tr("This NIF contains multiple materials. Only the selected one is replaced.", lang))
         self.edit_nif.setPlaceholderText(tr("Select the template NIF file", lang))
         self.lbl_bgsm.setText(tr("BGSM Folder:", lang))
         self.edit_bgsm.setPlaceholderText(tr("Folder containing BGSM files", lang))

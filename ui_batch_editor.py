@@ -5,6 +5,8 @@ General / Material の2セクションでパラメータを整理し、
 """
 
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -20,12 +22,14 @@ from config import AppConfig, tr
 
 class BatchWorker(QThread):
     log = pyqtSignal(str)
-    finished = pyqtSignal(int, int)
+    done = pyqtSignal(int, int)  # QThread.finished を上書きしないよう別名にする
 
-    def __init__(self, files, opts):
+    def __init__(self, files, opts, root: str = "", backup_dir: str = ""):
         super().__init__()
         self.files = files
         self.opts = opts
+        self.root = root
+        self.backup_dir = backup_dir
 
     def run(self):
         ok = err = 0
@@ -33,13 +37,18 @@ class BatchWorker(QThread):
             try:
                 bgsm = BGSM.read(path)
                 self._apply(bgsm, path)
+                if self.backup_dir:
+                    # 上書き前に元ファイルをフォルダ構造ごと退避する（失敗したら書き込まない）
+                    dst = os.path.join(self.backup_dir, os.path.relpath(path, self.root))
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(path, dst)
                 bgsm.write(path)
                 self.log.emit(f"✅ {path}")
                 ok += 1
             except Exception as e:
                 self.log.emit(f"❌ {path} → {e}")
                 err += 1
-        self.finished.emit(ok, err)
+        self.done.emit(ok, err)
 
     def _apply(self, b: BGSM, path: str):
         o = self.opts
@@ -129,6 +138,7 @@ class BatchEditorTab(QWidget):
         self._log_cb = log_callback
         self._worker = None
         self._files = []
+        self._scanned_folder = ""
         self._param_widgets = {}
         self._all_params = [] # [(chk, lbl, w), ...]用
         self.setAcceptDrops(True)
@@ -244,6 +254,10 @@ class BatchEditorTab(QWidget):
         root.addWidget(scroll, 1)
 
         # ── 実行ボタン ───────────────────────────────────────────────────────
+        self.chk_backup = QCheckBox(tr("Create backup before overwriting", AppConfig.lang))
+        self.chk_backup.setChecked(True)
+        root.addWidget(self.chk_backup)
+
         self.btn_run = QPushButton(tr("Apply Batch", AppConfig.lang))
         self.btn_run.setFixedHeight(38)
         self.btn_run.setStyleSheet("font-size: 14px; font-weight: bold;")
@@ -472,17 +486,36 @@ class BatchEditorTab(QWidget):
             QMessageBox.warning(self, tr("Warning", AppConfig.lang), tr("Please specify a valid folder", AppConfig.lang))
             return
         self._files = scan_bgsm(folder)
+        self._scanned_folder = folder
         self.lbl_count.setText(f"{tr('Scan Count:', AppConfig.lang)} {len(self._files)}")
 
     # ── 実行 ──────────────────────────────────────────────────────────────
     def _run(self):
+        if self._worker is not None and self._worker.isRunning():
+            return
         if not self._files:
             QMessageBox.warning(self, tr("Warning", AppConfig.lang), tr("Please specify a valid folder", AppConfig.lang))
             return
 
+        lang = AppConfig.lang
+        backup_dir = ""
+        if self.chk_backup.isChecked():
+            # 対象フォルダの外（隣）に作る。中に作ると次回スキャンでバックアップも対象になってしまう
+            src = os.path.normpath(self._scanned_folder)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = os.path.join(os.path.dirname(src), f"{os.path.basename(src) or 'root'}_backup_{stamp}")
+            # 同じ秒に再実行しても前回のバックアップ（元ファイル）を上書きしないようにする
+            backup_dir, n = base, 2
+            while os.path.exists(backup_dir):
+                backup_dir, n = f"{base}_{n}", n + 1
+
+        msg = (tr("{count} files in the following folder will be overwritten:", lang).replace("{count}", str(len(self._files)))
+               + f"\n{self._scanned_folder}\n")
+        if backup_dir:
+            msg += f"\n{tr('Backup folder:', lang)}\n{backup_dir}\n"
+        msg += f"\n{tr('Are you sure you want to continue?', lang)}"
         ret = QMessageBox.question(
-            self, tr("Confirm", AppConfig.lang),
-            f"{tr('Are you sure you want to continue?', AppConfig.lang)}",
+            self, tr("Confirm", lang), msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if ret != QMessageBox.StandardButton.Yes:
@@ -511,12 +544,18 @@ class BatchEditorTab(QWidget):
         opts["auto_mapping"] = self.chk_auto.isChecked()
         opts["auto_base"] = self.edit_auto_base.text()
 
-        self._worker = BatchWorker(self._files, opts)
+        self._worker = BatchWorker(self._files, opts, self._scanned_folder, backup_dir)
         self._worker.log.connect(lambda msg: self._log_cb(msg) if self._log_cb else None)
-        self._worker.finished.connect(self._on_done)
+        self._worker.done.connect(self._on_done)
+        self.btn_run.setEnabled(False)
+        self.btn_scan.setEnabled(False)
+        if backup_dir and self._log_cb:
+            self._log_cb(f"{tr('Backup folder:', AppConfig.lang)} {backup_dir}")
         self._worker.start()
 
     def _on_done(self, ok: int, err: int):
+        self.btn_run.setEnabled(True)
+        self.btn_scan.setEnabled(True)
         msg = f"{tr('Done', AppConfig.lang)}: OK {ok} / Error {err}"
         if self._log_cb:
             self._log_cb(msg)
@@ -539,6 +578,7 @@ class BatchEditorTab(QWidget):
         self.edit_auto_base.setPlaceholderText(tr("Base Path (e.g. textures\\actor\\)", lang))
         self.lbl_desc.setText(tr("Check the parameters you want to apply on the left", lang))
         self.btn_run.setText(tr("Apply Batch", lang))
+        self.chk_backup.setText(tr("Create backup before overwriting", lang))
 
         for btn in self._adv_buttons:
             title = tr("Advanced Settings", lang)

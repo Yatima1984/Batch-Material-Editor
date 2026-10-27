@@ -129,6 +129,13 @@ TRANSLATIONS = {
         "Please specify:": "以下を指定してください:",
         "Starting batch process...": "バッチ処理を開始...",
         "{count} NIF files generated.\nOpen output folder?": "{count} 個の NIF ファイルを生成しました。\n出力フォルダを開きますか？",
+        "Target Material:": "置換対象マテリアル:",
+        "This NIF contains multiple materials. Only the selected one is replaced.": "このNIFには複数のマテリアルがあります。選択したものだけを置き換えます。",
+
+        # Batch Editor (overwrite / backup)
+        "Create backup before overwriting": "上書き前にバックアップを作成する",
+        "{count} files in the following folder will be overwritten:": "以下のフォルダ内の {count} 件のファイルを上書きします:",
+        "Backup folder:": "バックアップ先:",
     },
     "ko": {
         "FO4 BGSM Tool": "FO4 BGSM 툴",
@@ -244,6 +251,13 @@ TRANSLATIONS = {
         "Please specify:": "다음을 지정해 주세요:",
         "Starting batch process...": "배치 처리를 시작합니다...",
         "{count} NIF files generated.\nOpen output folder?": "{count}개의 NIF 파일이 생성되었습니다.\n출력 폴더를 여시겠습니까?",
+        "Target Material:": "교체 대상 머티리얼:",
+        "This NIF contains multiple materials. Only the selected one is replaced.": "이 NIF에는 여러 머티리얼이 있습니다. 선택한 것만 교체합니다.",
+
+        # Batch Editor (overwrite / backup)
+        "Create backup before overwriting": "덮어쓰기 전에 백업 생성",
+        "{count} files in the following folder will be overwritten:": "다음 폴더의 {count}개 파일을 덮어씁니다:",
+        "Backup folder:": "백업 위치:",
     }
 }
 

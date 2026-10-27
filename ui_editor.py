@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from bgsm_core import BGSM, BGEM, ALPHA_BLEND_MODES, read_material
+from bgsm_core import BGSM, BGEM, ALPHA_BLEND_MODES, read_material, copy_base_fields
 from utils import TOOLTIPS
 from config import AppConfig, tr
 
@@ -196,6 +196,19 @@ def _int_spin(val: int, mn=0, mx=255) -> QSpinBox:
     return sb
 
 
+def _keep(w, orig):
+    """スピンボックスの値が GUI 上で変更されていなければ、
+    表示桁数への丸め・範囲制限を受ける前の元の値を返す（開いて保存するだけで値が変わるのを防ぐ）"""
+    v = w.value()
+    if isinstance(orig, bool) or not isinstance(orig, (int, float)):
+        return v
+    shown = min(max(orig, w.minimum()), w.maximum())
+    if isinstance(w, QDoubleSpinBox):
+        shown = round(shown, w.decimals())
+        return orig if abs(v - shown) < 10 ** -(w.decimals() + 2) else v
+    return orig if v == shown else v
+
+
 def _sep(layout: QGridLayout, row: int):
     sep = QFrame()
     sep.setFrameShape(QFrame.Shape.HLine)
@@ -253,11 +266,38 @@ class EditorTab(QWidget):
         self.tab.setCurrentIndex(1)
         root.addWidget(self.tab)
 
+    def _set_mode_combo(self, is_bgem: bool):
+        self.combo_mode.blockSignals(True)
+        self.combo_mode.setCurrentIndex(1 if is_bgem else 0)
+        self.combo_mode.blockSignals(False)
+
     def _on_mode_changed(self, index):
-        mode = self.combo_mode.currentData()
-        is_bgem = (mode == "bgem")
+        is_bgem = (self.combo_mode.currentData() == "bgem")
+        if is_bgem == self._is_bgem:
+            return
+        current = self._bgem if self._is_bgem else self._bgsm
+        converted = None
+        if current is not None:
+            # 編集中の内容が失われないよう、切り替え前に保存するか確認する
+            if not self.confirm_discard_changes():
+                self._set_mode_combo(self._is_bgem)
+                return
+            # 共通 (General) の値を引き継いだ新しい未保存ファイルとして変換する
+            src = self.collect_bgem() if self._is_bgem else self.collect_bgsm()
+            converted = BGEM() if is_bgem else BGSM()
+            copy_base_fields(src, converted)
+
         self._is_bgem = is_bgem
         self._switch_material_tab(is_bgem=is_bgem)
+        if converted is not None:
+            if is_bgem:
+                self._bgsm = None
+                self.load_bgem(converted)
+            else:
+                self._bgem = None
+                self.load_bgsm(converted)
+            self.lbl_path.setText(tr("Unsaved File", AppConfig.lang))
+            self.lbl_path.setStyleSheet("color: #aaa;")
 
     # ── General タブ ─────────────────────────────────────────────────────────
     def _build_general_tab(self) -> QWidget:
@@ -579,16 +619,16 @@ class EditorTab(QWidget):
         if self._bgsm and hasattr(self._bgsm, '_raw_path'):
             b._raw_path = self._bgsm._raw_path
         # General
-        b.version = self.w_version.value()
+        b.version = _keep(self.w_version, b.version)
         b.tile_u = self.w_tile_u.isChecked()
         b.tile_v = self.w_tile_v.isChecked()
-        b.u_offset = self.w_u_offset.value()
-        b.v_offset = self.w_v_offset.value()
-        b.u_scale = self.w_u_scale.value()
-        b.v_scale = self.w_v_scale.value()
-        b.alpha = self.w_alpha.value()
+        b.u_offset = _keep(self.w_u_offset, b.u_offset)
+        b.v_offset = _keep(self.w_v_offset, b.v_offset)
+        b.u_scale = _keep(self.w_u_scale, b.u_scale)
+        b.v_scale = _keep(self.w_v_scale, b.v_scale)
+        b.alpha = _keep(self.w_alpha, b.alpha)
         b.alpha_blend_mode = self.w_alpha_blend.currentText()
-        b.alpha_test_ref = self.w_alpha_test_ref.value()
+        b.alpha_test_ref = _keep(self.w_alpha_test_ref, b.alpha_test_ref)
         b.alpha_test = self.w_alpha_test.isChecked()
         b.z_buffer_write = self.w_zbuf_write.isChecked()
         b.z_buffer_test = self.w_zbuf_test.isChecked()
@@ -600,9 +640,9 @@ class EditorTab(QWidget):
         b.non_occluder = self.w_non_occluder.isChecked()
         b.refraction = self.w_refraction.isChecked()
         b.refraction_falloff = self.w_refraction_falloff.isChecked()
-        b.refraction_power = self.w_refraction_power.value()
+        b.refraction_power = _keep(self.w_refraction_power, b.refraction_power)
         b.environment_mapping = self.w_env_mapping.isChecked()
-        b.environment_mapping_mask_scale = self.w_env_mask_scale.value()
+        b.environment_mapping_mask_scale = _keep(self.w_env_mask_scale, b.environment_mapping_mask_scale)
         b.grayscale_to_palette_color = self.w_grayscale_palette.isChecked()
         # Material
         b.diffuse_texture = self.w_diffuse.text()
@@ -616,26 +656,26 @@ class EditorTab(QWidget):
         b.displacement_texture = self.w_displacement.text()
         b.enable_editor_alpha_ref = self.w_enable_editor_alpha.isChecked()
         b.rim_lighting = self.w_rim_lighting.isChecked()
-        b.rim_power = self.w_rim_power.value()
-        b.back_light_power = self.w_back_light_power.value()
+        b.rim_power = _keep(self.w_rim_power, b.rim_power)
+        b.back_light_power = _keep(self.w_back_light_power, b.back_light_power)
         b.subsurface_lighting = self.w_subsurface.isChecked()
-        b.subsurface_lighting_rolloff = self.w_subsurface_rolloff.value()
+        b.subsurface_lighting_rolloff = _keep(self.w_subsurface_rolloff, b.subsurface_lighting_rolloff)
         b.specular_enabled = self.w_specular_enabled.isChecked()
         b.specular_color = self.w_specular_color.get_color()
-        b.specular_mult = self.w_specular_mult.value()
-        b.smoothness = self.w_smoothness.value()
-        b.fresnel_power = self.w_fresnel.value()
-        b.wetness_control_spec_scale = self.w_wet_spec_scale.value()
-        b.wetness_control_spec_power_scale = self.w_wet_spec_power.value()
-        b.wetness_control_spec_minvar = self.w_wet_spec_minvar.value()
-        b.wetness_control_env_map_scale = self.w_wet_env_scale.value()
-        b.wetness_control_fresnel_power = self.w_wet_fresnel.value()
-        b.wetness_control_metalness = self.w_wet_metalness.value()
+        b.specular_mult = _keep(self.w_specular_mult, b.specular_mult)
+        b.smoothness = _keep(self.w_smoothness, b.smoothness)
+        b.fresnel_power = _keep(self.w_fresnel, b.fresnel_power)
+        b.wetness_control_spec_scale = _keep(self.w_wet_spec_scale, b.wetness_control_spec_scale)
+        b.wetness_control_spec_power_scale = _keep(self.w_wet_spec_power, b.wetness_control_spec_power_scale)
+        b.wetness_control_spec_minvar = _keep(self.w_wet_spec_minvar, b.wetness_control_spec_minvar)
+        b.wetness_control_env_map_scale = _keep(self.w_wet_env_scale, b.wetness_control_env_map_scale)
+        b.wetness_control_fresnel_power = _keep(self.w_wet_fresnel, b.wetness_control_fresnel_power)
+        b.wetness_control_metalness = _keep(self.w_wet_metalness, b.wetness_control_metalness)
         b.root_material_path = self.w_root_material.text()
         b.aniso_lighting = self.w_aniso.isChecked()
         b.emit_enabled = self.w_emit_enabled.isChecked()
         b.emittance_color = self.w_emittance_color.get_color()
-        b.emittance_mult = self.w_emittance_mult.value()
+        b.emittance_mult = _keep(self.w_emittance_mult, b.emittance_mult)
         b.model_space_normals = self.w_msn.isChecked()
         b.external_emittance = self.w_ext_emit.isChecked()
         b.back_lighting = self.w_back_lighting.isChecked()
@@ -653,12 +693,12 @@ class EditorTab(QWidget):
         b.facegen = self.w_facegen.isChecked()
         b.skin_tint = self.w_skin_tint.isChecked()
         b.tessellate = self.w_tessellate.isChecked()
-        b.displacement_texture_bias = self.w_disp_bias.value()
-        b.displacement_texture_scale = self.w_disp_scale.value()
-        b.tessellation_pn_scale = self.w_tess_pn.value()
-        b.tessellation_base_factor = self.w_tess_base.value()
-        b.tessellation_fade_distance = self.w_tess_fade.value()
-        b.grayscale_to_palette_scale = self.w_gs_palette_scale.value()
+        b.displacement_texture_bias = _keep(self.w_disp_bias, b.displacement_texture_bias)
+        b.displacement_texture_scale = _keep(self.w_disp_scale, b.displacement_texture_scale)
+        b.tessellation_pn_scale = _keep(self.w_tess_pn, b.tessellation_pn_scale)
+        b.tessellation_base_factor = _keep(self.w_tess_base, b.tessellation_base_factor)
+        b.tessellation_fade_distance = _keep(self.w_tess_fade, b.tessellation_fade_distance)
+        b.grayscale_to_palette_scale = _keep(self.w_gs_palette_scale, b.grayscale_to_palette_scale)
         b.skew_specular_alpha = self.w_skew_specular.isChecked()
         return b
 
@@ -783,16 +823,16 @@ class EditorTab(QWidget):
         if self._bgem and hasattr(self._bgem, '_raw_path'):
             em._raw_path = self._bgem._raw_path
         # General
-        em.version = self.w_version.value()
+        em.version = _keep(self.w_version, em.version)
         em.tile_u = self.w_tile_u.isChecked()
         em.tile_v = self.w_tile_v.isChecked()
-        em.u_offset = self.w_u_offset.value()
-        em.v_offset = self.w_v_offset.value()
-        em.u_scale = self.w_u_scale.value()
-        em.v_scale = self.w_v_scale.value()
-        em.alpha = self.w_alpha.value()
+        em.u_offset = _keep(self.w_u_offset, em.u_offset)
+        em.v_offset = _keep(self.w_v_offset, em.v_offset)
+        em.u_scale = _keep(self.w_u_scale, em.u_scale)
+        em.v_scale = _keep(self.w_v_scale, em.v_scale)
+        em.alpha = _keep(self.w_alpha, em.alpha)
         em.alpha_blend_mode = ALPHA_BLEND_MODES[self.w_alpha_blend.currentIndex()]
-        em.alpha_test_ref = self.w_alpha_test_ref.value()
+        em.alpha_test_ref = _keep(self.w_alpha_test_ref, em.alpha_test_ref)
         em.alpha_test = self.w_alpha_test.isChecked()
         em.z_buffer_write = self.w_zbuf_write.isChecked()
         em.z_buffer_test = self.w_zbuf_test.isChecked()
@@ -804,9 +844,9 @@ class EditorTab(QWidget):
         em.non_occluder = self.w_non_occluder.isChecked()
         em.refraction = self.w_refraction.isChecked()
         em.refraction_falloff = self.w_refraction_falloff.isChecked()
-        em.refraction_power = self.w_refraction_power.value()
+        em.refraction_power = _keep(self.w_refraction_power, em.refraction_power)
         em.environment_mapping = self.w_env_mapping.isChecked()
-        em.environment_mapping_mask_scale = self.w_env_mask_scale.value()
+        em.environment_mapping_mask_scale = _keep(self.w_env_mask_scale, em.environment_mapping_mask_scale)
         em.grayscale_to_palette_color = self.w_grayscale_palette.isChecked()
         # BGEM Material
         em.base_texture = self.w_bgem_base.text()
@@ -824,14 +864,14 @@ class EditorTab(QWidget):
         em.grayscale_to_palette_alpha = self.w_bgem_gs_palette_alpha.isChecked()
         em.soft_enabled = self.w_bgem_soft.isChecked()
         em.base_color = self.w_bgem_base_color.get_color()
-        em.base_color_scale = self.w_bgem_base_color_scale.value()
-        em.falloff_start_angle = self.w_bgem_falloff_start_angle.value()
-        em.falloff_stop_angle = self.w_bgem_falloff_stop_angle.value()
-        em.falloff_start_opacity = self.w_bgem_falloff_start_opacity.value()
-        em.falloff_stop_opacity = self.w_bgem_falloff_stop_opacity.value()
-        em.lighting_influence = self.w_bgem_lighting_influence.value()
-        em.envmap_min_lod = self.w_bgem_envmap_min_lod.value()
-        em.soft_depth = self.w_bgem_soft_depth.value()
+        em.base_color_scale = _keep(self.w_bgem_base_color_scale, em.base_color_scale)
+        em.falloff_start_angle = _keep(self.w_bgem_falloff_start_angle, em.falloff_start_angle)
+        em.falloff_stop_angle = _keep(self.w_bgem_falloff_stop_angle, em.falloff_stop_angle)
+        em.falloff_start_opacity = _keep(self.w_bgem_falloff_start_opacity, em.falloff_start_opacity)
+        em.falloff_stop_opacity = _keep(self.w_bgem_falloff_stop_opacity, em.falloff_stop_opacity)
+        em.lighting_influence = _keep(self.w_bgem_lighting_influence, em.lighting_influence)
+        em.envmap_min_lod = _keep(self.w_bgem_envmap_min_lod, em.envmap_min_lod)
+        em.soft_depth = _keep(self.w_bgem_soft_depth, em.soft_depth)
         em.emittance_color = self.w_bgem_emittance_color.get_color()
         em.glowmap = self.w_bgem_glowmap.isChecked()
         em.effect_pbr_specular = self.w_bgem_effect_pbr.isChecked()
